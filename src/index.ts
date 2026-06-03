@@ -331,6 +331,26 @@ If the sub-agent reports missing work, fix it and try again.`)
       //   - The main session's op="complete" is blocked (returns Task instructions)
     },
 
+    // Command hook: make /goal template text synthetic (hidden from user)
+    // so the TUI only shows a short summary instead of the full template.
+    async "command.execute.before"(input, output) {
+      if (input.command !== "goal") return
+
+      // Mark all template-generated parts as synthetic (LLM sees them, user doesn't)
+      for (const part of output.parts) {
+        if (part.type === "text") {
+          ;(part as any).synthetic = true
+        }
+      }
+
+      // Prepend a short, user-visible text with the objective
+      const objective = input.arguments?.trim()
+      output.parts.unshift({
+        type: "text" as const,
+        text: objective ? `🎯 ${objective}` : "🎯 Starting goal mode",
+      })
+    },
+
     // Event hook: listen for session idle → trigger continuation
     async event({ event }) {
       const evt = event as { type: string; properties: Record<string, any> }
