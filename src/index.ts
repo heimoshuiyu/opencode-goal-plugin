@@ -301,6 +301,7 @@ Only call \`complete\` when current evidence proves every requirement has been s
           {
             type: "text" as const,
             text: continuationPrompt(goal.objective, goal.completionCriterion),
+            synthetic: true,
           },
         ],
       })

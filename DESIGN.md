@@ -834,7 +834,7 @@ You MUST keep the full objective intact across turns. Do not redefine success ar
 |------|------|----------|
 | **递归风暴** | continuation 结束后又触发 idle → 无限循环 | `MAX_CONTINUATIONS` 上限 + `goal({op:"complete"})` 改变 status 后自动停止 |
 | **竞态条件** | 用户手动发消息与 plugin 自动续跑冲突 | 用户消息事件重置计数器 + 防抖延迟给用户操作窗口 |
-| **continuation 消息可见** | `promptAsync` 发的消息在 TUI 中作为普通用户消息显示 | 无法标记为 synthetic（这是当前插件限制），但影响有限 |
+| **continuation 消息可见** | `promptAsync` 发的消息在 TUI 中作为普通用户消息显示 | 已通过 `synthetic: true` 标记，TUI 会自动隐藏 synthetic parts，不影响用户体验 |
 | **event hook 是 fire-and-forget** | `void hook["event"]?.()` 不等 await 完成 | `queueContinuation` 内部自行处理错误，不依赖 hook 返回值 |
 
 #### 与核心方案（§2.5/§2.6）的对比
@@ -842,7 +842,7 @@ You MUST keep the full objective intact across turns. Do not redefine success ar
 | 维度 | 纯插件方案 | 核心修改方案 |
 |------|-----------|-------------|
 | **续跑触发** | event hook → promptAsync | runLoop 内递归调用 prompt() |
-| **消息隐藏** | ❌ continuation 在 TUI 可见 | ✅ 可标记 synthetic，TUI 不渲染 |
+| **消息隐藏** | ✅ continuation 通过 `synthetic: true` 在 TUI 中隐藏 | ✅ 可标记 synthetic，TUI 不渲染 |
 | **竞态控制** | 需自行防抖 | 天然串行，无竞态 |
 | **部署成本** | 零修改，即装即用 | 需 fork 核心代码 |
 | **稳定性** | 依赖事件时序、SDK 调用 | 完全内部控制 |
@@ -855,7 +855,7 @@ You MUST keep the full objective intact across turns. Do not redefine success ar
 - ✅ System prompt 注入（experimental.chat.system.transform）
 - ✅ 防抖、安全上限、递归保护
 - ❌ 无 TUI 状态栏集成（需要核心修改）
-- ❌ Continuation 消息在 TUI 中可见（无法标记 synthetic）
+- ✅ Continuation 消息通过 `synthetic: true` 在 TUI 中隐藏
 - ⚠️ 竞态风险（用户手动操作与自动续跑并行时需注意）
 
 ---
@@ -873,7 +873,7 @@ You MUST keep the full objective intact across turns. Do not redefine success ar
 
 2. **Phase 2：核心化（可选优化）**（1-2 周）
    - 如果 Phase 1 验证价值，再将 Goal Service 内置到 OpenCode Server
-   - 核心化后可实现：隐藏 continuation 消息（synthetic）、消除竞态风险、TUI 状态栏集成
+   - 核心化后可实现：消除竞态风险、TUI 状态栏集成
 
 3. **Phase 3：TUI 完整集成**（依赖 Phase 2，1 周）
    - TUI Action 命令（子命令解析、交互菜单）
