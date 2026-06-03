@@ -111,14 +111,12 @@ const serverPlugin: Plugin = async (input: PluginInput): Promise<Hooks> => {
     description: `Manage the active goal-mode objective.
 
 Use a single \`op\` field:
-- \`create\` starts a goal. Requires both \`objective\` and \`completion_criterion\`. Main session only.
-- \`get\` returns the current goal. Main session only.
-- \`resume\` re-activates a paused goal so work can continue. Main session only.
-- \`cancel\` discards the current goal entirely (deletes it). Main session only.
-- \`pause\` pauses the active goal. Main session only.
-- \`complete\` marks the goal as completed. Behavior depends on session type:
-  - **Main session**: BLOCKED. Returns instructions to delegate verification to the \`goal-verify\` sub-agent via the Task tool. You cannot complete the goal directly.
-  - **Verification sub-agent** (goal-verify agent via Task tool): ALLOWED. Only call this after you have independently inspected the current codebase state and confirmed every requirement is satisfied.`,
+- \`create\` starts a goal. Requires both \`objective\` and \`completion_criterion\`.
+- \`get\` returns the current goal.
+- \`resume\` re-activates a paused goal.
+- \`cancel\` discards the current goal.
+- \`pause\` pauses the active goal.
+- \`complete\` marks the goal as completed. Follow the returned instructions.`,
     args: {
       op: tool.schema
         .enum(["create", "get", "complete", "resume", "cancel", "pause"])
@@ -131,6 +129,7 @@ Use a single \`op\` field:
         .string()
         .optional()
         .describe("Concrete, checkable conditions that prove the goal is done (required for create)"),
+
     },
     async execute(args, ctx: ToolContext): Promise<ToolResult> {
       const { sessionID } = ctx
@@ -138,9 +137,12 @@ Use a single \`op\` field:
       const isSubAgent = !!session?.parentID
       const targetSessionID = session?.parentID ?? sessionID
 
-      // ── Sub-agent: only allowed to call "complete" on the parent session's goal ──
-      if (isSubAgent && args.op !== "complete") {
-        return "Error: sub-agents can only call goal({op:\"complete\"}). Other operations are restricted to the main session."
+      // ── Sub-agent: mutation operations (create/pause/resume/cancel) are restricted ──
+      // Sub-agents can read (get) and complete the parent session's goal, but
+      // cannot mutate goal state (create, pause, resume, cancel) — those are
+      // lifecycle operations that belong to the main session.
+      if (isSubAgent && ["create", "pause", "resume", "cancel"].includes(args.op)) {
+        return `Error: sub-agents cannot call goal({op:"${args.op}"}). Goal lifecycle operations (create, pause, resume, cancel) are restricted to the main session.`
       }
 
       // ── Sub-agent completion: complete the parent session's goal ──
@@ -172,11 +174,11 @@ Use a single \`op\` field:
           }
           const goal = createGoal(args.objective, args.completion_criterion)
           await writeGoal(client, sessionID, goal, sess ?? undefined)
-          return `Goal created: "${goal.objective}"\nCompletion criterion: ${goal.completionCriterion}\nStatus: active\nID: ${goal.id}`
+          return `Goal created: "${goal.objective}"\nCompletion criterion: ${goal.completionCriterion}\nStatus: active`
         }
 
         case "get": {
-          const { goal } = await readGoal(client, sessionID)
+          const { goal } = await readGoal(client, targetSessionID)
           if (!goal) return "No active goal."
           return formatGoalResponse(goal)
         }
@@ -189,28 +191,9 @@ Use a single \`op\` field:
             throw new Error(`Goal is not active (status: ${goal.status}).`)
           }
 
-          throw new Error(`BLOCKED: You cannot directly call goal({op:"complete"}) from the main session.
-You MUST delegate verification to the \`goal-verify\` sub-agent using the Task tool:
+          throw new Error(`BLOCKED: Call the \`goal-verify\` sub-agent via the Task tool.
 
-Call the Task tool with these parameters:
-- subagent_type: "goal-verify"
-- description: "Verify goal completion"
-- prompt: |
-    Verify whether this goal has been fully achieved:
-
-    <objective>
-    ${goal.objective}
-    </objective>
-
-    <completion_criterion>
-    ${goal.completionCriterion}
-    </completion_criterion>
-
-    Inspect the current codebase state and determine if every requirement is satisfied.
-    If all requirements are met, call goal({op:"complete"}).
-    If any requirement is not met, report what is missing.
-
-If the goal-verify sub-agent reports missing work, continue working on those items and request verification again when ready.`)
+If the sub-agent reports missing work, fix it and try again.`)
         }
 
         case "resume": {
@@ -333,16 +316,17 @@ If the goal-verify sub-agent reports missing work, continue working on those ite
       if (!agents["goal-verify"]) {
         agents["goal-verify"] = {
           mode: "subagent",
-          description: "Goal verification agent. Independently inspects the current codebase state to determine whether a goal's completion criteria are fully satisfied. Use this agent via the Task tool when goal({op:\"complete\"}) returns BLOCKED.",
+          description: "Goal verification agent. Calls goal({op:\"get\"}) to retrieve the objective and completion criterion, then independently inspects the current codebase state to determine whether all requirements are satisfied. Use this agent via the Task tool when goal({op:\"complete\"}) returns BLOCKED.",
           prompt: VERIFY_AGENT_PROMPT,
         }
       }
 
       // NOTE: We intentionally do NOT deny the goal tool for sub-agents here.
-      // The goal-verify sub-agent needs access to goal({op:"complete"}) to finalize
-      // goals after independent verification. The tool's execute() function
-      // enforces:
-      //   - Sub-agents can ONLY call op="complete" (other ops are rejected)
+      // The goal-verify sub-agent needs access to:
+      //   - goal({op:"get"}) to retrieve the objective and completion criterion
+      //   - goal({op:"complete"}) to finalize goals after independent verification
+      // The tool's execute() function enforces:
+      //   - Sub-agents CANNOT call mutation ops: create, pause, resume, cancel
       //   - Sub-agents operate on the PARENT session's goal (not their own)
       //   - The main session's op="complete" is blocked (returns Task instructions)
     },
@@ -388,9 +372,6 @@ function formatGoalResponse(goal: GoalData): string {
     `Goal: ${goal.objective}`,
     `Completion criterion: ${goal.completionCriterion}`,
     `Status: ${goal.status}`,
-    `ID: ${goal.id}`,
-    `Created: ${new Date(goal.createdAt).toISOString()}`,
-    `Updated: ${new Date(goal.updatedAt).toISOString()}`,
   ]
   return lines.join("\n")
 }
