@@ -231,25 +231,28 @@ If the sub-agent reports missing work, fix it and try again.`)
     },
   })
 
-  // ── Continuation Logic ────────────────────────────────────────────────────
+  // ── Abort Tracking ──────────────────────────────────────────────────────
+  //
+  // When a user presses ESC, the opencode core emits a "session.error" event
+  // with MessageAbortedError BEFORE the "session.status" idle event.
+  // The previous approach queried the database (via isLastMessageAborted) to
+  // detect abort, but the message error is written to the database AFTER the
+  // idle event is published — a classic TOCTOU race that caused the check to
+  // always return false, leading to an infinite abort→continuation loop.
+  //
+  // Instead, we track abort state in memory using the error event, which is
+  // guaranteed to arrive before the idle event that triggers queueContinuation.
 
-  async function isLastMessageAborted(sessionID: string): Promise<boolean> {
-    try {
-      const result = await client.messages({ sessionID, limit: 1 })
-      const messages = (result as any)?.data as Array<{ info: { role: string; error?: { name: string } } }> | undefined
-      const last = messages?.[0]
-      return last?.info?.role === "assistant" && last?.info?.error?.name === "MessageAbortedError"
-    } catch {
-      return false
-    }
-  }
+  const abortedSessions = new Set<string>()
 
   async function queueContinuation(sessionID: string) {
     const { goal } = await readGoal(client, sessionID)
     if (!goal || goal.status !== "active") return
 
     // User pressed Esc or called abort → pause the goal instead of continuing.
-    if (await isLastMessageAborted(sessionID)) {
+    // Check the in-memory flag (set by the session.error event handler below).
+    if (abortedSessions.has(sessionID)) {
+      abortedSessions.delete(sessionID)
       goal.status = "paused"
       goal.updatedAt = Date.now()
       await writeGoal(client, sessionID, goal)
@@ -355,6 +358,19 @@ If the sub-agent reports missing work, fix it and try again.`)
     async event({ event }) {
       const evt = event as { type: string; properties: Record<string, any> }
 
+      // Track aborts via session.error event.
+      // This event fires BEFORE the session.status idle event, so the flag is
+      // already set when queueContinuation runs on idle.
+      if (evt.type === "session.error") {
+        const errorName = evt.properties?.error?.name
+        if (errorName === "MessageAbortedError") {
+          const sessionID: string | undefined = evt.properties.sessionID
+          if (sessionID) {
+            abortedSessions.add(sessionID)
+          }
+        }
+      }
+
       // Session turn ended → check if we should queue continuation
       if (evt.type === "session.status" && evt.properties?.status?.type === "idle") {
         const sessionID: string | undefined = evt.properties.sessionID
@@ -374,6 +390,7 @@ If the sub-agent reports missing work, fix it and try again.`)
       if (evt.type === "message.updated" && evt.properties?.info?.role === "user") {
         const sessionID: string | undefined = evt.properties.sessionID
         if (sessionID) {
+          abortedSessions.delete(sessionID)
           const { goal, session } = await readGoal(client, sessionID)
           if (goal) {
             goal.continuationCount = 0
