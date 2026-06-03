@@ -2,7 +2,7 @@ import type { Plugin, PluginModule, PluginInput, Hooks, ToolContext, ToolResult 
 import { tool } from "@opencode-ai/plugin/tool"
 import { createOpencodeClient } from "@opencode-ai/sdk/v2"
 import type { Session } from "@opencode-ai/sdk/v2"
-import { GOAL_COMMAND_TEMPLATE, continuationPrompt } from "./prompts"
+import { GOAL_COMMAND_TEMPLATE, VERIFY_AGENT_PROMPT, continuationPrompt } from "./prompts"
 
 // ─── Types ────────────────────────────────────────────────────────────────────
 
@@ -117,8 +117,8 @@ Use a single \`op\` field:
 - \`cancel\` discards the current goal entirely (deletes it). Main session only.
 - \`pause\` pauses the active goal. Main session only.
 - \`complete\` marks the goal as completed. Behavior depends on session type:
-  - **Main session**: BLOCKED. Returns a Task tool template to spawn an independent verification sub-agent. You cannot complete the goal directly — the verification sub-agent must independently confirm all completion criteria.
-  - **Verification sub-agent** (session created by Task tool for goal verification): ALLOWED. Only call this after you have independently inspected the current codebase state and confirmed every requirement is satisfied.`,
+  - **Main session**: BLOCKED. Returns instructions to delegate verification to the \`goal-verify\` sub-agent via the Task tool. You cannot complete the goal directly.
+  - **Verification sub-agent** (goal-verify agent via Task tool): ALLOWED. Only call this after you have independently inspected the current codebase state and confirmed every requirement is satisfied.`,
     args: {
       op: tool.schema
         .enum(["create", "get", "complete", "resume", "cancel", "pause"])
@@ -182,7 +182,7 @@ Use a single \`op\` field:
         }
 
         case "complete": {
-          // BLOCKED in main session — must use a verification sub-agent
+          // BLOCKED in main session — must use the goal-verify sub-agent
           const { goal } = await readGoal(client, sessionID)
           if (!goal) return "No active goal."
           if (goal.status !== "active") {
@@ -190,44 +190,27 @@ Use a single \`op\` field:
           }
 
           return `BLOCKED: You cannot directly call goal({op:"complete"}) from the main session.
-You MUST delegate verification to an independent sub-agent using the Task tool. This ensures an unbiased, fresh-context verification of your work.
+You MUST delegate verification to the \`goal-verify\` sub-agent using the Task tool:
 
 Call the Task tool with these parameters:
-- subagent_type: "general"
+- subagent_type: "goal-verify"
 - description: "Verify goal completion"
-- prompt: (see below)
+- prompt: |
+    Verify whether this goal has been fully achieved:
 
------- Task tool prompt (copy and adapt) ------
-You are an independent verification agent. Your ONLY job is to determine whether the following goal has been fully achieved. You start with a FRESH context — do not assume any prior work was done correctly.
+    <objective>
+    ${goal.objective}
+    </objective>
 
-<goal_objective>
-${goal.objective}
-</goal_objective>
+    <completion_criterion>
+    ${goal.completionCriterion}
+    </completion_criterion>
 
-<completion_criterion>
-${goal.completionCriterion}
-</completion_criterion>
+    Inspect the current codebase state and determine if every requirement is satisfied.
+    If all requirements are met, call goal({op:"complete"}).
+    If any requirement is not met, report what is missing.
 
-Verification procedure:
-1. Derive concrete requirements from the completion criterion above.
-2. For EACH requirement, inspect the CURRENT state of the codebase:
-   - Read the relevant files (do NOT rely on memory or assumptions)
-   - Run relevant tests, builds, or commands
-   - Check for the exact artifacts, behaviors, or states specified
-3. For each requirement, classify your finding:
-   - SATISFIED: direct, current evidence proves it is done
-   - NOT SATISFIED: evidence shows it is missing, incomplete, or broken
-   - UNCERTAIN: evidence is too weak, indirect, or missing to prove completion
-4. If ALL requirements are SATISFIED:
-   Call goal({op:"complete"})
-5. If ANY requirement is NOT SATISFIED or UNCERTAIN:
-   Do NOT call goal({op:"complete"}).
-   Instead, return a detailed report of what is missing or unverified.
-
-Be strict. Treat uncertain evidence as not achieved. Match verification scope to claim scope.
------- end prompt ------
-
-If the verification sub-agent reports missing work, continue working on those items and request verification again when ready.`
+If the goal-verify sub-agent reports missing work, continue working on those items and request verification again when ready.`
         }
 
         case "resume": {
@@ -322,10 +305,9 @@ If the verification sub-agent reports missing work, continue working on those it
     //    standalone package without requiring a .opencode/commands/goal.md file.
     //    Opencode's bootstrap calls plugin.init() before other services, so
     //    injecting cfg.command here is visible when Command.Service initializes.
-    // 2. The goal tool is now accessible to sub-agents (but restricted to
-    //    op="complete" only in the tool's execute function). This enables the
-    //    verification sub-agent pattern: the main session cannot complete goals
-    //    directly — it must delegate to a Task sub-agent for independent verification.
+    // 2. Register the "goal-verify" sub-agent for goal completion verification.
+    // 3. The goal tool is accessible to sub-agents (but restricted to
+    //    op="complete" only in the tool's execute function).
     config(cfg: Record<string, unknown>) {
       // ── Inject /goal command ────────────────────────────────────────────
       if (!cfg.command) {
@@ -339,9 +321,27 @@ If the verification sub-agent reports missing work, continue working on those it
         }
       }
 
+      // ── Register "goal-verify" sub-agent ───────────────────────────────────
+      // A verification agent with a dedicated system prompt.
+      // The main session's goal({op:"complete"}) is blocked and returns
+      // instructions to use this agent via the Task tool. Only this agent
+      // can call goal({op:"complete"}) on the parent session's goal.
+      if (!cfg.agent) {
+        cfg.agent = {}
+      }
+      const agents = cfg.agent as Record<string, Record<string, unknown>>
+      if (!agents["goal-verify"]) {
+        agents["goal-verify"] = {
+          mode: "subagent",
+          description: "Goal verification agent. Independently inspects the current codebase state to determine whether a goal's completion criteria are fully satisfied. Use this agent via the Task tool when goal({op:\"complete\"}) returns BLOCKED.",
+          prompt: VERIFY_AGENT_PROMPT,
+        }
+      }
+
       // NOTE: We intentionally do NOT deny the goal tool for sub-agents here.
-      // Sub-agents need access to goal({op:"complete"}) to finalize goals after
-      // independent verification. The tool's execute() function enforces:
+      // The goal-verify sub-agent needs access to goal({op:"complete"}) to finalize
+      // goals after independent verification. The tool's execute() function
+      // enforces:
       //   - Sub-agents can ONLY call op="complete" (other ops are rejected)
       //   - Sub-agents operate on the PARENT session's goal (not their own)
       //   - The main session's op="complete" is blocked (returns Task instructions)
