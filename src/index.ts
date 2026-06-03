@@ -184,12 +184,12 @@ Use a single \`op\` field:
         case "complete": {
           // BLOCKED in main session — must use the goal-verify sub-agent
           const { goal } = await readGoal(client, sessionID)
-          if (!goal) return "No active goal."
+          if (!goal) throw new Error("No active goal.")
           if (goal.status !== "active") {
-            return `Goal is not active (status: ${goal.status}).`
+            throw new Error(`Goal is not active (status: ${goal.status}).`)
           }
 
-          return `BLOCKED: You cannot directly call goal({op:"complete"}) from the main session.
+          throw new Error(`BLOCKED: You cannot directly call goal({op:"complete"}) from the main session.
 You MUST delegate verification to the \`goal-verify\` sub-agent using the Task tool:
 
 Call the Task tool with these parameters:
@@ -210,7 +210,7 @@ Call the Task tool with these parameters:
     If all requirements are met, call goal({op:"complete"}).
     If any requirement is not met, report what is missing.
 
-If the goal-verify sub-agent reports missing work, continue working on those items and request verification again when ready.`
+If the goal-verify sub-agent reports missing work, continue working on those items and request verification again when ready.`)
         }
 
         case "resume": {
