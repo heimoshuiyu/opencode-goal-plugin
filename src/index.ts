@@ -2,6 +2,7 @@ import type { Plugin, PluginModule, PluginInput, Hooks, ToolContext, ToolResult 
 import { tool } from "@opencode-ai/plugin/tool"
 import { createOpencodeClient } from "@opencode-ai/sdk/v2"
 import type { Session } from "@opencode-ai/sdk/v2"
+import { GOAL_COMMAND_TEMPLATE, continuationPrompt } from "./prompts"
 
 // ─── Types ────────────────────────────────────────────────────────────────────
 
@@ -88,50 +89,6 @@ function canTransitionTo(goal: GoalData, targetStatus: GoalStatus): boolean {
     default:
       return false
   }
-}
-
-// ─── Prompt Templates ─────────────────────────────────────────────────────────
-
-function continuationPrompt(objective: string, completionCriterion: string): string {
-  return `Continue working toward the active goal.
-
-<objective>
-${objective}
-</objective>
-
-<completion_criterion>
-${completionCriterion}
-</completion_criterion>
-
-Continuation behavior:
-- This goal persists across turns. Ending this turn does not require shrinking the objective to what fits now.
-- Keep the full objective intact. If it cannot be finished now, make concrete progress toward the real requested end state, leave the goal active, and do not redefine success around a smaller or easier task.
-- Temporary rough edges are acceptable while the work is moving in the right direction. Completion still requires the requested end state to be true and verified.
-
-Work from evidence:
-Use the current worktree and external state as authoritative. Previous conversation context can help locate relevant work, but inspect the current state before relying on it. Improve, replace, or remove existing work as needed to satisfy the actual objective.
-
-Fidelity:
-- Optimize each turn for movement toward the requested end state, not for the smallest stable-looking subset or easiest passing change.
-- Do not substitute a narrower, safer, smaller, merely compatible, or easier-to-test solution because it is more likely to pass current tests.
-- Treat alignment as movement toward the requested end state. An edit is aligned only if it makes the requested final state more true; useful-looking behavior that preserves a different end state is misaligned.
-
-Completion audit:
-Before deciding that the goal is achieved, treat completion as unproven and verify it against the actual current state:
-- Derive concrete requirements from the objective, completion criterion, and any referenced files, plans, specifications, issues, or user instructions.
-- Preserve the original scope; do not redefine success around the work that already exists.
-- For every explicit requirement, numbered item, named artifact, command, test, gate, invariant, and deliverable, identify the authoritative evidence that would prove it, then inspect the relevant current-state sources: files, command output, test results, PR state, rendered artifacts, runtime behavior, or other authoritative evidence.
-- For each item, determine whether the evidence proves completion, contradicts completion, shows incomplete work, is too weak or indirect to verify completion, or is missing.
-- Match the verification scope to the requirement's scope; do not use a narrow check to support a broad claim.
-- Treat tests, manifests, verifiers, green checks, and search results as evidence only after confirming they cover the relevant requirement.
-- Treat uncertain or indirect evidence as not achieved; gather stronger evidence or continue the work.
-- The audit must prove completion, not merely fail to find obvious remaining work.
-
-Do not rely on intent, partial progress, memory of earlier work, or a plausible final answer as proof of completion. Marking the goal complete is a claim that the full objective has been finished and can withstand requirement-by-requirement scrutiny. Only mark the goal achieved when current evidence proves every requirement has been satisfied and no required work remains. If the evidence is incomplete, weak, indirect, merely consistent with completion, or leaves any requirement missing, incomplete, or unverified, keep working instead of marking the goal complete.
-
-If the objective is achieved, call \`goal({op:"complete"})\`. Do not call \`goal({op:"complete"})\` unless the goal is actually complete. Do not mark a goal complete merely because the budget is nearly exhausted or because you are stopping work.
-
-If the work is not done, just keep working. Do not narrate that you are continuing — execute.`
 }
 
 // ─── Plugin ───────────────────────────────────────────────────────────────────
@@ -317,10 +274,29 @@ Only call \`complete\` when current evidence proves every requirement has been s
       goal: goalTool,
     },
 
-    // Config hook: deny the goal tool in all sub-agent sessions so it never
-    // appears in their LLM context.  This is the primary defense; the runtime
-    // parentID check in execute() is a safety net.
+    // Config hook:
+    // 1. Register the /goal command dynamically so the plugin works as a
+    //    standalone package without requiring a .opencode/commands/goal.md file.
+    //    Opencode's bootstrap calls plugin.init() before other services, so
+    //    injecting cfg.command here is visible when Command.Service initializes.
+    // 2. Deny the goal tool in all sub-agent sessions so it never appears in
+    //    their LLM context. This is the primary defense; the runtime parentID
+    //    check in execute() is a safety net.
     config(cfg: Record<string, unknown>) {
+      // ── Inject /goal command ────────────────────────────────────────────
+      if (!cfg.command) {
+        cfg.command = {}
+      }
+      const commands = cfg.command as Record<string, { template: string; description?: string; agent?: string; subtask?: boolean }>
+      if (!commands["goal"]) {
+        commands["goal"] = {
+          template: GOAL_COMMAND_TEMPLATE,
+          description: "Start autonomous goal mode - the agent will work autonomously until the objective is achieved",
+          agent: "primary",
+        }
+      }
+
+      // ── Deny goal tool for sub-agents ────────────────────────────────────
       const agents = cfg.agent as Record<string, { mode?: string; permission?: Record<string, unknown> }> | undefined
       if (!agents) return
       for (const agent of Object.values(agents)) {
