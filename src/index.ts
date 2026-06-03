@@ -3,13 +3,6 @@ import { tool } from "@opencode-ai/plugin/tool"
 import { createOpencodeClient } from "@opencode-ai/sdk/v2"
 import type { Session } from "@opencode-ai/sdk/v2"
 
-// Minimal logger — avoids depending on @opencode-ai/core (private package).
-// Bun captures console output and routes it through its own logger.
-const log = {
-  info: (...args: unknown[]) => console.log("[goal-plugin]", ...args),
-  error: (...args: unknown[]) => console.error("[goal-plugin]", ...args),
-}
-
 // ─── Types ────────────────────────────────────────────────────────────────────
 
 type GoalStatus = "active" | "paused" | "complete"
@@ -294,15 +287,12 @@ Only call \`complete\` when current evidence proves every requirement has been s
       goal.status = "paused"
       goal.updatedAt = Date.now()
       await writeGoal(client, sessionID, goal)
-      log.info("Goal paused due to user interrupt", goal.objective)
       return
     }
 
     goal.continuationCount++
     goal.updatedAt = Date.now()
     await writeGoal(client, sessionID, goal)
-
-    log.info("Queueing continuation", { count: goal.continuationCount }, goal.objective)
 
     try {
       await client.session.promptAsync({
@@ -314,8 +304,7 @@ Only call \`complete\` when current evidence proves every requirement has been s
           },
         ],
       })
-    } catch (err) {
-      log.error("promptAsync failed", err)
+    } catch {
     }
   }
 
