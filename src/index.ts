@@ -292,7 +292,6 @@ Only call \`complete\` when current evidence proves every requirement has been s
         commands["goal"] = {
           template: GOAL_COMMAND_TEMPLATE,
           description: "Start autonomous goal mode - the agent will work autonomously until the objective is achieved",
-          agent: "primary",
         }
       }
 

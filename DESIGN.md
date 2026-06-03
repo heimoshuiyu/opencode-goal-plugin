@@ -438,7 +438,6 @@ If the work is not done, just keep working. Do not narrate that you are continui
 ```markdown
 ---
 description: Start autonomous goal mode
-agent: primary
 ---
 
 You are now in Goal Mode. The user wants you to autonomously work toward the following objective:
@@ -480,7 +479,6 @@ Create the goal now and begin working.
 ```markdown
 ---
 description: Start autonomous goal mode - the agent will work autonomously until the objective is achieved
-agent: primary
 ---
 
 You are entering Goal Mode. Work autonomously to achieve the following objective:
