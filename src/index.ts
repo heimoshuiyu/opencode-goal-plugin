@@ -111,23 +111,14 @@ const serverPlugin: Plugin = async (input: PluginInput): Promise<Hooks> => {
     description: `Manage the active goal-mode objective.
 
 Use a single \`op\` field:
-- \`create\` starts a goal. Requires both \`objective\` and \`completion_criterion\`.
-- \`get\` returns the current goal.
-- \`resume\` re-activates a paused goal so work can continue.
-- \`complete\` marks the goal complete after you have verified every deliverable in the completion criterion against current evidence.
-- \`cancel\` discards the current goal entirely (deletes it).
-- \`pause\` pauses the active goal.
-
-Completion rules:
-Set \`complete\` only when the objective has actually been achieved and no required work remains. The completion call is a load-bearing claim that ends the autonomous loop and surfaces a "done" report to the user.
-
-Do NOT call \`complete\`:
-- Merely because a turn is ending or budget is nearly exhausted.
-- After only producing a plan, summary, first pass, or partial result.
-- Because you are stopping work or the task seems "good enough".
-- Based on intent, partial progress, memory of earlier work, or a plausible answer.
-
-Only call \`complete\` when current evidence proves every requirement has been satisfied.`,
+- \`create\` starts a goal. Requires both \`objective\` and \`completion_criterion\`. Main session only.
+- \`get\` returns the current goal. Main session only.
+- \`resume\` re-activates a paused goal so work can continue. Main session only.
+- \`cancel\` discards the current goal entirely (deletes it). Main session only.
+- \`pause\` pauses the active goal. Main session only.
+- \`complete\` marks the goal as completed. Behavior depends on session type:
+  - **Main session**: BLOCKED. Returns a Task tool template to spawn an independent verification sub-agent. You cannot complete the goal directly — the verification sub-agent must independently confirm all completion criteria.
+  - **Verification sub-agent** (session created by Task tool for goal verification): ALLOWED. Only call this after you have independently inspected the current codebase state and confirmed every requirement is satisfied.`,
     args: {
       op: tool.schema
         .enum(["create", "get", "complete", "resume", "cancel", "pause"])
@@ -143,15 +134,30 @@ Only call \`complete\` when current evidence proves every requirement has been s
     },
     async execute(args, ctx: ToolContext): Promise<ToolResult> {
       const { sessionID } = ctx
-
-      // Sub-agent sessions (created by Task tool) must not use the goal tool.
-      // If a sub-agent has a goal, idle events would trigger background continuations
-      // that run invisibly, burning tokens without returning results to the parent session.
       const session = await getSession(client, sessionID)
-      if (session?.parentID) {
-        return "Error: the goal tool is not available in sub-agent sessions. Goals can only be managed in the main session."
+      const isSubAgent = !!session?.parentID
+      const targetSessionID = session?.parentID ?? sessionID
+
+      // ── Sub-agent: only allowed to call "complete" on the parent session's goal ──
+      if (isSubAgent && args.op !== "complete") {
+        return "Error: sub-agents can only call goal({op:\"complete\"}). Other operations are restricted to the main session."
       }
 
+      // ── Sub-agent completion: complete the parent session's goal ──
+      if (isSubAgent && args.op === "complete") {
+        const { goal: parentGoal, session: parentSession } = await readGoal(client, targetSessionID)
+        if (!parentGoal) return "No goal to complete in the parent session."
+        if (parentGoal.status !== "active") {
+          return `Parent session goal is not active (status: ${parentGoal.status}). Cannot complete.`
+        }
+
+        parentGoal.status = "complete"
+        parentGoal.updatedAt = Date.now()
+        await writeGoal(client, targetSessionID, parentGoal, parentSession ?? undefined)
+        return `Goal completed and verified: "${parentGoal.objective}"`
+      }
+
+      // ── Main session: all operations except "complete" ──
       switch (args.op) {
         case "create": {
           if (!args.objective?.trim()) {
@@ -160,12 +166,12 @@ Only call \`complete\` when current evidence proves every requirement has been s
           if (!args.completion_criterion?.trim()) {
             return "Error: completion_criterion is required when op=create. You must define concrete, checkable conditions that prove the goal is done. If the user's request is vague, ask for clarification before creating the goal."
           }
-          const { goal: existing, session } = await readGoal(client, sessionID)
+          const { goal: existing, session: sess } = await readGoal(client, sessionID)
           if (existing && existing.status === "active") {
             return `Error: an active goal already exists: "${existing.objective}"`
           }
           const goal = createGoal(args.objective, args.completion_criterion)
-          await writeGoal(client, sessionID, goal, session ?? undefined)
+          await writeGoal(client, sessionID, goal, sess ?? undefined)
           return `Goal created: "${goal.objective}"\nCompletion criterion: ${goal.completionCriterion}\nStatus: active\nID: ${goal.id}`
         }
 
@@ -176,19 +182,56 @@ Only call \`complete\` when current evidence proves every requirement has been s
         }
 
         case "complete": {
-          const { goal, session } = await readGoal(client, sessionID)
-          if (!goal) return "No goal to complete."
-          if (!canTransitionTo(goal, "complete")) {
-            return `Goal is not active (status: ${goal.status}). Only active goals can be completed.`
+          // BLOCKED in main session — must use a verification sub-agent
+          const { goal } = await readGoal(client, sessionID)
+          if (!goal) return "No active goal."
+          if (goal.status !== "active") {
+            return `Goal is not active (status: ${goal.status}).`
           }
-          goal.status = "complete"
-          goal.updatedAt = Date.now()
-          await writeGoal(client, sessionID, goal, session ?? undefined)
-          return `Goal completed: "${goal.objective}"`
+
+          return `BLOCKED: You cannot directly call goal({op:"complete"}) from the main session.
+You MUST delegate verification to an independent sub-agent using the Task tool. This ensures an unbiased, fresh-context verification of your work.
+
+Call the Task tool with these parameters:
+- subagent_type: "general"
+- description: "Verify goal completion"
+- prompt: (see below)
+
+------ Task tool prompt (copy and adapt) ------
+You are an independent verification agent. Your ONLY job is to determine whether the following goal has been fully achieved. You start with a FRESH context — do not assume any prior work was done correctly.
+
+<goal_objective>
+${goal.objective}
+</goal_objective>
+
+<completion_criterion>
+${goal.completionCriterion}
+</completion_criterion>
+
+Verification procedure:
+1. Derive concrete requirements from the completion criterion above.
+2. For EACH requirement, inspect the CURRENT state of the codebase:
+   - Read the relevant files (do NOT rely on memory or assumptions)
+   - Run relevant tests, builds, or commands
+   - Check for the exact artifacts, behaviors, or states specified
+3. For each requirement, classify your finding:
+   - SATISFIED: direct, current evidence proves it is done
+   - NOT SATISFIED: evidence shows it is missing, incomplete, or broken
+   - UNCERTAIN: evidence is too weak, indirect, or missing to prove completion
+4. If ALL requirements are SATISFIED:
+   Call goal({op:"complete"})
+5. If ANY requirement is NOT SATISFIED or UNCERTAIN:
+   Do NOT call goal({op:"complete"}).
+   Instead, return a detailed report of what is missing or unverified.
+
+Be strict. Treat uncertain evidence as not achieved. Match verification scope to claim scope.
+------ end prompt ------
+
+If the verification sub-agent reports missing work, continue working on those items and request verification again when ready.`
         }
 
         case "resume": {
-          const { goal, session } = await readGoal(client, sessionID)
+          const { goal, session: sess } = await readGoal(client, sessionID)
           if (!goal) return "No goal to resume."
           if (!canTransitionTo(goal, "active")) {
             return `Goal cannot be resumed (status: ${goal.status}). Only paused goals can be resumed.`
@@ -196,26 +239,26 @@ Only call \`complete\` when current evidence proves every requirement has been s
           goal.status = "active"
           goal.updatedAt = Date.now()
           goal.continuationCount = 0
-          await writeGoal(client, sessionID, goal, session ?? undefined)
+          await writeGoal(client, sessionID, goal, sess ?? undefined)
           return `Goal resumed: "${goal.objective}"\nStatus: active`
         }
 
         case "pause": {
-          const { goal, session } = await readGoal(client, sessionID)
+          const { goal, session: sess } = await readGoal(client, sessionID)
           if (!goal) return "No goal to pause."
           if (!canTransitionTo(goal, "paused")) {
             return `Goal cannot be paused (status: ${goal.status}). Only active goals can be paused.`
           }
           goal.status = "paused"
           goal.updatedAt = Date.now()
-          await writeGoal(client, sessionID, goal, session ?? undefined)
+          await writeGoal(client, sessionID, goal, sess ?? undefined)
           return `Goal paused: "${goal.objective}"\nStatus: paused`
         }
 
         case "cancel": {
-          const { goal, session } = await readGoal(client, sessionID)
+          const { goal, session: sess } = await readGoal(client, sessionID)
           if (!goal) return "No goal to cancel."
-          await writeGoal(client, sessionID, null, session ?? undefined)
+          await writeGoal(client, sessionID, null, sess ?? undefined)
           return `Goal cancelled: "${goal.objective}"`
         }
       }
@@ -279,9 +322,10 @@ Only call \`complete\` when current evidence proves every requirement has been s
     //    standalone package without requiring a .opencode/commands/goal.md file.
     //    Opencode's bootstrap calls plugin.init() before other services, so
     //    injecting cfg.command here is visible when Command.Service initializes.
-    // 2. Deny the goal tool in all sub-agent sessions so it never appears in
-    //    their LLM context. This is the primary defense; the runtime parentID
-    //    check in execute() is a safety net.
+    // 2. The goal tool is now accessible to sub-agents (but restricted to
+    //    op="complete" only in the tool's execute function). This enables the
+    //    verification sub-agent pattern: the main session cannot complete goals
+    //    directly — it must delegate to a Task sub-agent for independent verification.
     config(cfg: Record<string, unknown>) {
       // ── Inject /goal command ────────────────────────────────────────────
       if (!cfg.command) {
@@ -295,14 +339,12 @@ Only call \`complete\` when current evidence proves every requirement has been s
         }
       }
 
-      // ── Deny goal tool for sub-agents ────────────────────────────────────
-      const agents = cfg.agent as Record<string, { mode?: string; permission?: Record<string, unknown> }> | undefined
-      if (!agents) return
-      for (const agent of Object.values(agents)) {
-        if (agent.mode === "subagent") {
-          agent.permission = { ...agent.permission, goal: "deny" }
-        }
-      }
+      // NOTE: We intentionally do NOT deny the goal tool for sub-agents here.
+      // Sub-agents need access to goal({op:"complete"}) to finalize goals after
+      // independent verification. The tool's execute() function enforces:
+      //   - Sub-agents can ONLY call op="complete" (other ops are rejected)
+      //   - Sub-agents operate on the PARENT session's goal (not their own)
+      //   - The main session's op="complete" is blocked (returns Task instructions)
     },
 
     // Event hook: listen for session idle → trigger continuation
@@ -313,6 +355,12 @@ Only call \`complete\` when current evidence proves every requirement has been s
       if (evt.type === "session.status" && evt.properties?.status?.type === "idle") {
         const sessionID: string | undefined = evt.properties.sessionID
         if (sessionID) {
+          // Only queue continuations for the main session (not sub-agent sessions).
+          // Sub-agent sessions have a parentID; their idle events should not trigger
+          // background continuations.
+          const session = await getSession(client, sessionID)
+          if (session?.parentID) return
+
           void queueContinuation(sessionID)
         }
       }
