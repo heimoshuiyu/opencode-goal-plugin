@@ -2,7 +2,7 @@ import type { Plugin, PluginModule, PluginInput, Hooks, ToolContext, ToolResult 
 import { tool } from "@opencode-ai/plugin/tool"
 import { createOpencodeClient } from "@opencode-ai/sdk/v2"
 import type { Session } from "@opencode-ai/sdk/v2"
-import { GOAL_COMMAND_TEMPLATE, VERIFY_AGENT_PROMPT, continuationPrompt } from "./prompts"
+import { GOAL_COMMAND_TEMPLATE, VERIFY_AGENT_PROMPT, continuationPrompt, subagentGoalContext } from "./prompts"
 
 // ─── Types ────────────────────────────────────────────────────────────────────
 
@@ -332,6 +332,20 @@ If the sub-agent reports missing work, fix it and try again.`)
       //   - Sub-agents CANNOT call mutation ops: create, pause, resume, cancel
       //   - Sub-agents operate on the PARENT session's goal (not their own)
       //   - The main session's op="complete" is blocked (returns Task instructions)
+    },
+
+    // Tool hook: inject goal context into sub-agent prompts.
+    // When the main agent spawns a goal-verify sub-agent, restructure the prompt
+    // so the sub-agent treats the goal's objective and completion criterion as
+    // its primary target, with the original prompt as supplementary instructions.
+    async "tool.execute.before"(input, output) {
+      const args = output.args as { prompt?: string; description?: string; subagent_type?: string }
+      if (input.tool !== "task" || args.subagent_type !== "goal-verify" || !args.prompt) return
+
+      const { goal } = await readGoal(client, input.sessionID)
+      if (!goal) return
+
+      args.prompt = subagentGoalContext(goal.objective, goal.completionCriterion, args.prompt)
     },
 
     // Command hook: make /goal template text synthetic (hidden from user)

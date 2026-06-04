@@ -108,6 +108,23 @@ First step: Call goal({op:"get"}) to retrieve the objective and completion crite
 
 Do not create or modify any files. You are a read-only verifier.`
 
+// ─── Sub-agent Goal Context (injected via tool.execute.before hook) ────────────
+
+export function subagentGoalContext(objective: string, completionCriterion: string, originalPrompt: string): string {
+  return `<objective>
+${objective}
+</objective>
+
+<completion_criterion>
+${completionCriterion}
+</completion_criterion>
+
+<extra_context>
+Supplementary guidance from the main agent on how to approach this work. This is secondary to the objective and completion criterion above.
+${originalPrompt}
+</extra_context>`
+}
+
 // ─── Continuation Prompt (injected via promptAsync on idle) ────────────────────
 
 export function continuationPrompt(objective: string, completionCriterion: string): string {
