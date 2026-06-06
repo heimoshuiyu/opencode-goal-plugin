@@ -55,7 +55,7 @@
 ```json
 {
   "$schema": "https://opencode.ai/config.json",
-  "plugin": ["opencode-goal-plugin"]
+  "plugin": ["@heimoshuiyu/opencode-goal-plugin"]
 }
 ```
 

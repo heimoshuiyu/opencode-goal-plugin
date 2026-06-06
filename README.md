@@ -57,7 +57,7 @@ Add the plugin to your [OpenCode config](https://opencode.ai/docs/config/):
 ```json
 {
   "$schema": "https://opencode.ai/config.json",
-  "plugin": ["opencode-goal-plugin"]
+  "plugin": ["@heimoshuiyu/opencode-goal-plugin"]
 }
 ```
 
