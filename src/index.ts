@@ -334,18 +334,29 @@ If the sub-agent reports missing work, fix it and try again.`)
       //   - The main session's op="complete" is blocked (returns Task instructions)
     },
 
-    // Tool hook: inject goal context into sub-agent prompts.
-    // When the main agent spawns a goal-verify sub-agent, restructure the prompt
-    // so the sub-agent treats the goal's objective and completion criterion as
-    // its primary target, with the original prompt as supplementary instructions.
-    async "tool.execute.before"(input, output) {
-      const args = output.args as { prompt?: string; description?: string; subagent_type?: string }
-      if (input.tool !== "task" || args.subagent_type !== "goal-verify" || !args.prompt) return
+    // Message hook: inject goal context into goal-verify sub-agent's user message.
+    // This fires in the sub-agent's session, BEFORE the user message is stored
+    // in the database. We modify the text parts in place, so the stored message
+    // IS the transformed version — compact-safe, resume-safe, and the main
+    // session's tool call context remains unchanged (original prompt).
+    async "chat.message"(input, output) {
+      if (input.agent !== "goal-verify") return
 
-      const { goal } = await readGoal(client, input.sessionID)
+      // This hook fires in the sub-agent session. Check if the parent session
+      // has an active goal.
+      const session = await getSession(client, input.sessionID)
+      if (!session?.parentID) return
+
+      const { goal } = await readGoal(client, session.parentID)
       if (!goal) return
 
-      args.prompt = subagentGoalContext(goal.objective, goal.completionCriterion, args.prompt)
+      // Transform all text parts: objective/completion_criterion as primary,
+      // original prompt wrapped as extra context.
+      for (const part of output.parts) {
+        if (part.type === "text" && (part as any).text) {
+          ;(part as any).text = subagentGoalContext(goal.objective, goal.completionCriterion, (part as any).text)
+        }
+      }
     },
 
     // Command hook: make /goal template text synthetic (hidden from user)
