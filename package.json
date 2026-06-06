@@ -1,21 +1,30 @@
 {
-  "name": "opencode-goal-plugin",
-  "version": "0.1.0",
-  "description": "OpenCode Goal Plugin — Autonomous multi-turn agent with goal tracking, continuation, and interrupt auto-pause",
+  "name": "@heimoshuiyu/opencode-goal-plugin",
+  "version": "1.0.0",
+  "description": "OpenCode plugin that enables autonomous goal-driven agent mode with multi-turn continuation, independent completion verification, and interrupt auto-pause",
   "main": "./src/index.ts",
   "type": "module",
+  "exports": {
+    ".": "./src/index.ts"
+  },
   "scripts": {
     "build": "echo 'No build needed - OpenCode loads .ts directly'"
   },
   "dependencies": {
-    "@opencode-ai/plugin": "^1.15.12"
+    "@opencode-ai/plugin": "*"
   },
   "keywords": [
     "opencode",
-    "plugin",
+    "opencode-plugin",
     "goal",
     "autonomous",
     "agent"
   ],
-  "license": "MIT"
+  "author": "heimoshuiyu",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/heimoshuiyu/opencode-goal-plugin.git"
+  },
+  "homepage": "https://github.com/heimoshuiyu/opencode-goal-plugin#readme"
 }
