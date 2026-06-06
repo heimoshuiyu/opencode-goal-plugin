@@ -1,6 +1,0 @@
-[submodule "references/oh-my-pi"]
-	path = references/oh-my-pi
-	url = https://github.com/can1357/oh-my-pi.git
-[submodule "references/kimi-code"]
-	path = references/kimi-code
-	url = https://github.com/MoonshotAI/kimi-code.git
